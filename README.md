@@ -1,6 +1,6 @@
 # vm24
 
-24 KiB static PIE WebAssembly sandbox for untrusted stdin/stdout workers on x86-64 Linux. No libc, heap, filesystem, or network — one guest per process, supervisor owns everything else.
+24 KiB static PIE WebAssembly sandbox for untrusted stdin/stdout workers on x86-64 Linux. No libc, heap, filesystem, or network, one guest per process, supervisor owns everything else.
 
 ```sh
 zig build
