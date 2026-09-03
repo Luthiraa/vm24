@@ -1,8 +1,8 @@
-# vm16
+# vm24
 
-`vm16` is a tiny, single-process WebAssembly runtime for untrusted stdin/stdout workers on x86-64 Linux.
+`vm24` is a tiny WebAssembly runtime for running untrusted stdin/stdout workers on x86-64 Linux.
 
-It is a real interpreter and sandbox written in freestanding Zig. There is no mock execution path, libc, heap allocator, filesystem access, network access, or JIT. `src/vm.zig` parses, validates, instantiates, and interprets the guest; `src/main.zig` provides the Linux process boundary and WASI host calls.
+It is a real interpreter and sandbox written in freestanding Zig. No libc, heap, filesystem, network, or JIT. The VM parses, validates, instantiates, and runs the guest itself.
 
 ## Build and run
 
@@ -19,7 +19,7 @@ The build runs tests, creates the release binary, trims unnecessary ELF metadata
 zig build test
 ```
 
-Tests cover malformed modules, parser fuzzing, integer traps, fuel exhaustion, bounded memory, WASI behavior, and invalid linear-memory access.
+Tests cover malformed modules, parser fuzzing, traps, fuel exhaustion, bounded memory, WASI behavior, and invalid memory access.
 
 ## Supported guest profile
 
@@ -45,7 +45,7 @@ Floating point, SIMD, threads, exception handling, and direct system calls are n
 | Process CPU / wall time | 5s / 10s |
 | Native address space | 96 MiB |
 
-These values are deliberately hardcoded as the launcher's fixed policy. The VM exposes `Limits` for tests and embedding, while the CLI uses the defaults.
+These are deliberately hardcoded limits for the launcher. The VM exposes `Limits` for tests and embedding.
 
 ## Containment
 
@@ -65,7 +65,7 @@ After lockdown, only the syscalls needed by the host interface are allowed: `rea
 
 ## Scope
 
-This is a small, auditable experiment and constrained worker runtime—not a full Wasm engine or independently security-audited sandbox. For hostile multi-tenant production use, add an outer isolation layer such as a separate user, container, or VM boundary.
+This is a small, auditable experiment and constrained worker runtime—not a full Wasm engine or independently audited sandbox. For hostile multi-tenant workloads, use an outer isolation layer too.
 
 ## Layout
 
