@@ -1,8 +1,8 @@
 ENTRY(_start)
 PHDRS {
-    text PT_LOAD FILEHDR PHDRS FLAGS(5);
-    data PT_LOAD FLAGS(6);
-    stack PT_GNU_STACK FLAGS(6);
+    text PT_LOAD FILEHDR PHDRS FLAGS(5); /* RX */
+    data PT_LOAD FLAGS(6);               /* RW */
+    stack PT_GNU_STACK FLAGS(6);         /* RW, no exec */
 }
 SECTIONS {
     . = SIZEOF_HEADERS;

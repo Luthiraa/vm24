@@ -12,7 +12,8 @@ pub fn main(init: std.process.Init) !void {
     if (args.len != 3) return error.BadArguments;
     const dir = std.Io.Dir.cwd();
     const image = try dir.readFileAlloc(init.io, args[1], allocator, .limited(1 << 20));
-    if (image.len < 64 or !std.mem.eql(u8, image[0..7], "\x7fELF\x02\x01\x01") or le(image[16..18]) != 3 or le(image[18..20]) != 62) return error.BadElf;
+    const elf64_le_x86 = image.len >= 64 and std.mem.eql(u8, image[0..7], "\x7fELF\x02\x01\x01") and le(image[16..18]) == 3 and le(image[18..20]) == 62;
+    if (!elf64_le_x86) return error.BadElf;
 
     const phoff: usize = @intCast(le(image[32..40]));
     const phentsize: usize = @intCast(le(image[54..56]));
@@ -23,19 +24,21 @@ pub fn main(init: std.process.Init) !void {
     var rw = false;
     for (0..phnum) |i| {
         const p = phoff + i * phentsize;
-        if (le(image[p..][0..4]) != 1) continue;
+        if (le(image[p..][0..4]) != 1) continue; // not PT_LOAD
         const flags = le(image[p..][4..8]);
         const offset: usize = @intCast(le(image[p..][8..16]));
         const vaddr: usize = @intCast(le(image[p..][16..24]));
         const filesz: usize = @intCast(le(image[p..][32..40]));
         const alignment = le(image[p..][48..56]);
-        if (flags & 3 == 3 or alignment < 4096 or offset % 4096 != vaddr % 4096 or offset + filesz < offset) return error.BadElf;
+        const wx = flags & 3 == 3;
+        const misaligned = alignment < 4096 or offset % 4096 != vaddr % 4096 or offset + filesz < offset;
+        if (wx or misaligned) return error.BadElf;
         rx = rx or flags == 5;
         rw = rw or flags == 6;
         end = @max(end, offset + filesz);
     }
     if (!rx or !rw or end > 24_576) return error.BadElf;
-    @memset(image[40..48], 0); // no section-header table
+    @memset(image[40..48], 0); // drop section-header table
     @memset(image[58..64], 0);
     try dir.writeFile(init.io, .{
         .sub_path = args[2],

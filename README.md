@@ -1,24 +1,79 @@
-# vm24
+# vm16
 
-24 KiB static PIE WebAssembly sandbox for untrusted stdin/stdout workers on x86-64 Linux. No libc, heap, filesystem, or network, one guest per process, supervisor owns everything else.
+`vm16` is a tiny, single-process WebAssembly runtime for untrusted stdin/stdout workers on x86-64 Linux.
+
+It is a real interpreter and sandbox written in freestanding Zig. There is no mock execution path, libc, heap allocator, filesystem access, network access, or JIT. `src/vm.zig` parses, validates, instantiates, and interprets the guest; `src/main.zig` provides the Linux process boundary and WASI host calls.
+
+## Build and run
+
+Requirements: Zig 0.16.0 and x86-64 Linux.
 
 ```sh
 zig build
-./zig-out/bin/vm16 agent.wasm [args...]
+./zig-out/bin/vm16 worker.wasm [args...]
 ```
 
-Zig 0.16.0 to build. Linux 3.17+ to run. `zig build` runs tests, trims the ELF, and enforces the 24 KiB size limit.
+The build runs tests, creates the release binary, trims unnecessary ELF metadata, and enforces the 24 KiB final-size limit.
 
-**Wasm profile:** i32/i64 MVP + sign-ext, bulk memory, tables, narrow WASI (stdio, args, random, clocks, exit). Compile guests as integer-only `wasm32-wasi`. No float, SIMD, threads, or direct I/O.
+```sh
+zig build test
+```
 
-**Containment:** parse and validate before execution, fuel/memory/stack limits, seccomp allowlist (`read`/`write`/`exit`/`getrandom`/`clock_gettime` only), closed inherited fds, no core dumps. Defaults: 50M fuel, 64 MiB linear memory, 1 MiB stdio, 5s CPU / 10s wall.
+Tests cover malformed modules, parser fuzzing, integer traps, fuel exhaustion, bounded memory, WASI behavior, and invalid linear-memory access.
 
-| exit | meaning |
+## Supported guest profile
+
+- WebAssembly i32 and i64 instructions
+- sign-extension and bulk-memory instructions
+- one table and one linear memory
+- narrow WASI `snapshot_preview1` / `wasi_unstable`
+- stdin/stdout/stderr, arguments, random bytes, clocks, close, and exit
+- integer-only `wasm32-wasi` guests
+
+Floating point, SIMD, threads, exception handling, and direct system calls are not supported. Unknown WASI imports fail closed.
+
+## Fixed limits
+
+| Resource | Default |
+|---|---:|
+| Guest fuel | 50 million instructions |
+| Guest linear memory | 64 MiB |
+| Operand stack | 4,096 values |
+| Call depth | 64 frames |
+| Guest input/output | 1 MiB each |
+| Module size | 4 MiB |
+| Process CPU / wall time | 5s / 10s |
+| Native address space | 96 MiB |
+
+These values are deliberately hardcoded as the launcher's fixed policy. The VM exposes `Limits` for tests and embedding, while the CLI uses the defaults.
+
+## Containment
+
+Before running the guest, the launcher makes the module read-only, reserves guest memory, closes inherited file descriptors, applies resource limits, disables core dumps, enables `PR_SET_NO_NEW_PRIVS`, and installs seccomp.
+
+After lockdown, only the syscalls needed by the host interface are allowed: `read`, `write`, `exit`, `exit_group`, `getrandom`, and `clock_gettime`.
+
+## Exit codes
+
+| Code | Meaning |
 |---:|---|
-| guest code | clean return |
-| 1 | trap or bad module |
-| 2 | launcher/setup failure |
-| 3 | unsupported feature |
-| 124 | limit hit |
+| guest code | Normal guest/WASI exit |
+| 1 | Trap or malformed module |
+| 2 | Launcher/setup failure |
+| 3 | Unsupported feature |
+| 124 | Limit reached |
 
-`zig build test` — unit tests. `zig build test --fuzz` — parser/validator fuzzing.
+## Scope
+
+This is a small, auditable experiment and constrained worker runtime—not a full Wasm engine or independently security-audited sandbox. For hostile multi-tenant production use, add an outer isolation layer such as a separate user, container, or VM boundary.
+
+## Layout
+
+```text
+src/main.zig       Linux launcher, raw syscalls, limits, seccomp
+src/vm.zig         Wasm parser, validator, interpreter, WASI bridge
+src/vm_test.zig    Unit tests and fuzz target
+tools/trim_elf.zig ELF validation and size trimming
+link.ld            Minimal linker script
+build.zig          Build, test, trim, and size-check pipeline
+```

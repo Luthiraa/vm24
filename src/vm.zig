@@ -1,3 +1,4 @@
+// parse -> typecheck -> instantiate -> interpret. i32/i64 only.
 const PAGE = 65536;
 
 pub const Trap = enum(u8) { ok, malformed, unsupported, limit, runtime, exit };
@@ -29,7 +30,7 @@ const MAX_TABLE = 1024;
 const MAX_IOVECS = 64;
 const INVALID_FUNC: u16 = 0xffff;
 
-const T = enum(u8) { i32, i64, bot };
+const T = enum(u8) { i32, i64, bot }; // bot = unreachable code
 
 fn eql(a: []const u8, b: []const u8) bool {
     if (a.len != b.len) return false;
@@ -37,7 +38,7 @@ fn eql(a: []const u8, b: []const u8) bool {
     return true;
 }
 
-const Cur = struct {
+const Cur = struct { // cursor over wasm bytes
     p: [*]const u8,
     e: [*]const u8,
 
@@ -119,7 +120,7 @@ fn valueType(b: u8) ?T {
     };
 }
 
-const TypeRec = struct { pc: u8, rc: u8, p: [MAX_PARAMS]T, r: T };
+const TypeRec = struct { nparams: u8, nresults: u8, params: [MAX_PARAMS]T, result: T };
 const ImportRec = struct { module: Span, name: Span, ty: u8, host_id: u8 };
 const ExportRec = struct { name: Span, kind: u8, idx: u16 };
 const GlobalRec = struct { ty: T, mutable: bool, init: Span };
@@ -191,6 +192,7 @@ fn parseModule(bytes: []const u8, m: *Mod) Trap {
         const id = file.byte() orelse return .malformed;
         const size = file.u32leb() orelse return .malformed;
         if (file.left() < size) return .malformed;
+        // custom (0) can repeat. data_count (12) has to come before code (10).
         const rank: u8 = switch (id) {
             0 => 0,
             1...9 => id,
@@ -218,25 +220,25 @@ fn parseSection(id: u8, c: *Cur, m: *Mod) Trap {
     }
     const n = c.u32leb() orelse return .malformed;
     switch (id) {
-        1 => {
+        1 => { // types
             if (n > MAX_TYPES) return .limit;
             var i: u32 = 0;
             while (i < n) : (i += 1) {
                 if (c.byte() != 0x60) return .malformed;
-                const pc = c.u32leb() orelse return .malformed;
-                if (pc > MAX_PARAMS) return .unsupported;
-                var rec: TypeRec = .{ .pc = @intCast(pc), .rc = 0, .p = undefined, .r = .i32 };
+                const nparams = c.u32leb() orelse return .malformed;
+                if (nparams > MAX_PARAMS) return .unsupported;
+                var rec: TypeRec = .{ .nparams = @intCast(nparams), .nresults = 0, .params = undefined, .result = .i32 };
                 var j: u32 = 0;
-                while (j < pc) : (j += 1) rec.p[j] = valueType(c.byte() orelse return .malformed) orelse return .unsupported;
-                const rc = c.u32leb() orelse return .malformed;
-                if (rc > 1) return .unsupported;
-                rec.rc = @intCast(rc);
-                if (rc == 1) rec.r = valueType(c.byte() orelse return .malformed) orelse return .unsupported;
+                while (j < nparams) : (j += 1) rec.params[j] = valueType(c.byte() orelse return .malformed) orelse return .unsupported;
+                const nresults = c.u32leb() orelse return .malformed;
+                if (nresults > 1) return .unsupported;
+                rec.nresults = @intCast(nresults);
+                if (nresults == 1) rec.result = valueType(c.byte() orelse return .malformed) orelse return .unsupported;
                 m.types[m.ntypes] = rec;
                 m.ntypes += 1;
             }
         },
-        2 => {
+        2 => { // imports
             if (n > MAX_IMPORTS) return .limit;
             var i: u32 = 0;
             while (i < n) : (i += 1) {
@@ -251,7 +253,7 @@ fn parseSection(id: u8, c: *Cur, m: *Mod) Trap {
                 m.nfuncs += 1;
             }
         },
-        3 => {
+        3 => { // functions
             if (n > MAX_FUNCS - m.nfuncs) return .limit;
             var i: u32 = 0;
             while (i < n) : (i += 1) {
@@ -261,7 +263,7 @@ fn parseSection(id: u8, c: *Cur, m: *Mod) Trap {
                 m.nfuncs += 1;
             }
         },
-        4 => {
+        4 => { // table
             if (n > 1 or m.has_table) return .unsupported;
             if (n == 1) {
                 if (c.byte() != 0x70) return .unsupported;
@@ -271,7 +273,7 @@ fn parseSection(id: u8, c: *Cur, m: *Mod) Trap {
                 m.has_table = true;
             }
         },
-        5 => {
+        5 => { // memory
             if (n > 1 or m.has_memory) return .unsupported;
             if (n == 1) {
                 const lim = limits(c) orelse return .malformed;
@@ -280,7 +282,7 @@ fn parseSection(id: u8, c: *Cur, m: *Mod) Trap {
                 m.has_memory = true;
             }
         },
-        6 => {
+        6 => { // globals
             if (n > MAX_GLOBALS) return .limit;
             var i: u32 = 0;
             while (i < n) : (i += 1) {
@@ -292,7 +294,7 @@ fn parseSection(id: u8, c: *Cur, m: *Mod) Trap {
                 m.nglobals += 1;
             }
         },
-        7 => {
+        7 => { // exports
             if (n > MAX_EXPORTS) return .limit;
             var i: u32 = 0;
             while (i < n) : (i += 1) {
@@ -306,12 +308,12 @@ fn parseSection(id: u8, c: *Cur, m: *Mod) Trap {
                 m.nexports += 1;
             }
         },
-        8 => {
+        8 => { // start
             if (n >= m.nfuncs) return .malformed;
             m.start = @intCast(n);
             m.has_start = true;
         },
-        9 => {
+        9 => { // elements
             if (n > MAX_ELEMS) return .limit;
             var i: u32 = 0;
             while (i < n) : (i += 1) {
@@ -330,7 +332,7 @@ fn parseSection(id: u8, c: *Cur, m: *Mod) Trap {
                 m.nelems += 1;
             }
         },
-        10 => {
+        10 => { // code
             if (n > MAX_CODES) return .limit;
             var i: u32 = 0;
             while (i < n) : (i += 1) {
@@ -354,7 +356,7 @@ fn parseSection(id: u8, c: *Cur, m: *Mod) Trap {
                 c.p = end;
             }
         },
-        11 => {
+        11 => { // data
             if (n > MAX_DATA) return .limit;
             var i: u32 = 0;
             while (i < n) : (i += 1) {
@@ -370,7 +372,7 @@ fn parseSection(id: u8, c: *Cur, m: *Mod) Trap {
                 c.p += len;
             }
         },
-        12 => {
+        12 => { // data_count
             m.data_count = n;
             m.has_data_count = true;
         },
@@ -379,16 +381,16 @@ fn parseSection(id: u8, c: *Cur, m: *Mod) Trap {
     return .ok;
 }
 
-fn signature(t: *const TypeRec, p: []const T, r: ?T) bool {
-    if (t.pc != p.len or t.rc != @intFromBool(r != null)) return false;
-    for (p, 0..) |x, i| if (t.p[i] != x) return false;
-    return r == null or t.r == r.?;
+fn signature(t: *const TypeRec, params: []const T, result: ?T) bool {
+    if (t.nparams != params.len or t.nresults != @intFromBool(result != null)) return false;
+    for (params, 0..) |x, i| if (t.params[i] != x) return false;
+    return result == null or t.result == result.?;
 }
 
 fn sameSignature(a: *const TypeRec, b: *const TypeRec) bool {
-    if (a.pc != b.pc or a.rc != b.rc or (a.rc == 1 and a.r != b.r)) return false;
+    if (a.nparams != b.nparams or a.nresults != b.nresults or (a.nresults == 1 and a.result != b.result)) return false;
     var i: u8 = 0;
-    while (i < a.pc) : (i += 1) if (a.p[i] != b.p[i]) return false;
+    while (i < a.nparams) : (i += 1) if (a.params[i] != b.params[i]) return false;
     return true;
 }
 
@@ -409,12 +411,27 @@ const HostId = enum(u8) {
     denied_trap,
 };
 
+fn wasiId(name: []const u8, ty: *const TypeRec) HostId {
+    if (eql(name, "proc_exit") and signature(ty, &.{.i32}, null)) return .proc_exit;
+    if (eql(name, "fd_write") and signature(ty, &.{ .i32, .i32, .i32, .i32 }, .i32)) return .fd_write;
+    if (eql(name, "fd_read") and signature(ty, &.{ .i32, .i32, .i32, .i32 }, .i32)) return .fd_read;
+    if (eql(name, "args_sizes_get") and signature(ty, &.{ .i32, .i32 }, .i32)) return .args_sizes_get;
+    if (eql(name, "args_get") and signature(ty, &.{ .i32, .i32 }, .i32)) return .args_get;
+    if (eql(name, "environ_sizes_get") and signature(ty, &.{ .i32, .i32 }, .i32)) return .environ_sizes_get;
+    if (eql(name, "environ_get") and signature(ty, &.{ .i32, .i32 }, .i32)) return .environ_get;
+    if (eql(name, "random_get") and signature(ty, &.{ .i32, .i32 }, .i32)) return .random_get;
+    if (eql(name, "clock_time_get") and signature(ty, &.{ .i32, .i64, .i32 }, .i32)) return .clock_time_get;
+    if (eql(name, "fd_fdstat_get") and signature(ty, &.{ .i32, .i32 }, .i32)) return .fd_fdstat_get;
+    if (eql(name, "fd_close") and signature(ty, &.{.i32}, .i32)) return .fd_close;
+    if (eql(name, "sched_yield") and signature(ty, &.{}, .i32)) return .sched_yield;
+    if (ty.nresults == 1 and ty.result == .i32) return .denied_errno;
+    return .denied_trap;
+}
+
 fn bindImport(m: *Mod, imp: *ImportRec) bool {
-    if (!eql(imp.module.bytes(), "wasi_snapshot_preview1") and !eql(imp.module.bytes(), "wasi_unstable")) return false;
-    const name = imp.name.bytes();
-    const ty = &m.types[imp.ty];
-    const id: HostId = if (eql(name, "proc_exit") and signature(ty, &.{.i32}, null)) .proc_exit else if (eql(name, "fd_write") and signature(ty, &.{ .i32, .i32, .i32, .i32 }, .i32)) .fd_write else if (eql(name, "fd_read") and signature(ty, &.{ .i32, .i32, .i32, .i32 }, .i32)) .fd_read else if (eql(name, "args_sizes_get") and signature(ty, &.{ .i32, .i32 }, .i32)) .args_sizes_get else if (eql(name, "args_get") and signature(ty, &.{ .i32, .i32 }, .i32)) .args_get else if (eql(name, "environ_sizes_get") and signature(ty, &.{ .i32, .i32 }, .i32)) .environ_sizes_get else if (eql(name, "environ_get") and signature(ty, &.{ .i32, .i32 }, .i32)) .environ_get else if (eql(name, "random_get") and signature(ty, &.{ .i32, .i32 }, .i32)) .random_get else if (eql(name, "clock_time_get") and signature(ty, &.{ .i32, .i64, .i32 }, .i32)) .clock_time_get else if (eql(name, "fd_fdstat_get") and signature(ty, &.{ .i32, .i32 }, .i32)) .fd_fdstat_get else if (eql(name, "fd_close") and signature(ty, &.{.i32}, .i32)) .fd_close else if (eql(name, "sched_yield") and signature(ty, &.{}, .i32)) .sched_yield else if (ty.rc == 1 and ty.r == .i32) .denied_errno else .denied_trap;
-    imp.host_id = @intFromEnum(id);
+    const module = imp.module.bytes();
+    if (!eql(module, "wasi_snapshot_preview1") and !eql(module, "wasi_unstable")) return false;
+    imp.host_id = @intFromEnum(wasiId(imp.name.bytes(), &m.types[imp.ty]));
     return true;
 }
 
@@ -437,7 +454,7 @@ fn finishModule(m: *Mod) Trap {
     }
     if (m.has_start) {
         const t = &m.types[m.func_types[m.start]];
-        if (t.pc != 0 or t.rc != 0) return .malformed;
+        if (t.nparams != 0 or t.nresults != 0) return .malformed;
     }
     if (m.nelems != 0 and !m.has_table) return .malformed;
     if (m.has_data_count and m.data_count != m.ndatas) return .malformed;
@@ -502,9 +519,9 @@ fn vbranch(labels: []Ctrl, depth: u32, conditional: bool) bool {
 fn validateBody(m: *const Mod, fidx: u16) Trap {
     const code = m.codes[fidx - m.nimports];
     const ft = &m.types[m.func_types[fidx]];
-    if (@as(u16, ft.pc) + code.locals > MAX_LOCALS) return .limit;
+    if (@as(u16, ft.nparams) + code.locals > MAX_LOCALS) return .limit;
     var nl: usize = 0;
-    while (nl < ft.pc) : (nl += 1) vlocals[nl] = ft.p[nl];
+    while (nl < ft.nparams) : (nl += 1) vlocals[nl] = ft.params[nl];
     var dc = Cur{ .p = code.decl, .e = code.body };
     const groups = dc.u32leb() orelse return .malformed;
     var g: u32 = 0;
@@ -520,7 +537,7 @@ fn validateBody(m: *const Mod, fidx: u16) Trap {
     }
     if (!dc.done()) return .malformed;
     var labels: [MAX_LABELS]Ctrl = undefined;
-    labels[0] = .{ .kind = 0xff, .height = 0, .has = ft.rc == 1, .ty = ft.r, .dead = false, .seen_else = false };
+    labels[0] = .{ .kind = 0xff, .height = 0, .has = ft.nresults == 1, .ty = ft.result, .dead = false, .seen_else = false };
     var lp: usize = 1;
     vsp = 0;
     var c = Cur{ .p = code.body, .e = code.end };
@@ -528,16 +545,16 @@ fn validateBody(m: *const Mod, fidx: u16) Trap {
         const op = c.byte() orelse return .malformed;
         var top = &labels[lp - 1];
         switch (op) {
-            0x00 => markDead(top),
-            0x01 => {},
-            0x02, 0x03, 0x04 => {
+            0x00 => markDead(top), // unreachable
+            0x01 => {}, // nop
+            0x02, 0x03, 0x04 => { // block, loop, if
                 if (op == 0x04 and !vpop(top, .i32)) return .malformed;
                 const bt = blockType(&c) orelse return .unsupported;
                 if (lp >= MAX_LABELS) return .limit;
                 labels[lp] = .{ .kind = op, .height = @intCast(vsp), .has = bt.has, .ty = bt.ty, .dead = false, .seen_else = false };
                 lp += 1;
             },
-            0x05 => {
+            0x05 => { // else
                 if (top.kind != 0x04 or top.seen_else) return .malformed;
                 if (top.has and !vpop(top, top.ty)) return .malformed;
                 if (vsp != top.height) return .malformed;
@@ -545,7 +562,7 @@ fn validateBody(m: *const Mod, fidx: u16) Trap {
                 top.dead = false;
                 top.seen_else = true;
             },
-            0x0b => {
+            0x0b => { // end
                 if (top.has and !vpop(top, top.ty)) return .malformed;
                 if (vsp != top.height or (top.kind == 0x04 and top.has and !top.seen_else)) return .malformed;
                 const has = top.has;
@@ -554,12 +571,12 @@ fn validateBody(m: *const Mod, fidx: u16) Trap {
                 if (lp == 0) return if (c.done()) .ok else .malformed;
                 if (has and !vpush(ty)) return .limit;
             },
-            0x0c, 0x0d => {
+            0x0c, 0x0d => { // br, br_if
                 const depth = c.u32leb() orelse return .malformed;
                 if (op == 0x0d and !vpop(top, .i32)) return .malformed;
                 if (!vbranch(labels[0..lp], depth, op == 0x0d)) return .malformed;
             },
-            0x0e => {
+            0x0e => { // br_table
                 const count = c.u32leb() orelse return .malformed;
                 if (!vpop(top, .i32)) return .malformed;
                 var expected: ?T = null;
@@ -577,51 +594,51 @@ fn validateBody(m: *const Mod, fidx: u16) Trap {
                 if (expected) |ty| if (!vpop(top, ty)) return .malformed;
                 markDead(top);
             },
-            0x0f => if (!vbranch(labels[0..lp], @intCast(lp - 1), false)) return .malformed,
-            0x10 => {
+            0x0f => if (!vbranch(labels[0..lp], @intCast(lp - 1), false)) return .malformed, // return
+            0x10 => { // call
                 const f = c.u32leb() orelse return .malformed;
                 if (f >= m.nfuncs) return .malformed;
                 const t = &m.types[m.func_types[f]];
-                var j: usize = t.pc;
+                var j: usize = t.nparams;
                 while (j != 0) {
                     j -= 1;
-                    if (!vpop(top, t.p[j])) return .malformed;
+                    if (!vpop(top, t.params[j])) return .malformed;
                 }
-                if (t.rc == 1 and !vpush(t.r)) return .limit;
+                if (t.nresults == 1 and !vpush(t.result)) return .limit;
             },
-            0x11 => {
+            0x11 => { // call_indirect
                 const ty = c.u32leb() orelse return .malformed;
                 if (ty >= m.ntypes or c.byte() != 0 or !m.has_table or !vpop(top, .i32)) return .malformed;
                 const t = &m.types[ty];
-                var j: usize = t.pc;
+                var j: usize = t.nparams;
                 while (j != 0) {
                     j -= 1;
-                    if (!vpop(top, t.p[j])) return .malformed;
+                    if (!vpop(top, t.params[j])) return .malformed;
                 }
-                if (t.rc == 1 and !vpush(t.r)) return .limit;
+                if (t.nresults == 1 and !vpush(t.result)) return .limit;
             },
-            0x1a => if (vpopAny(top) == null) return .malformed,
-            0x1b => {
+            0x1a => if (vpopAny(top) == null) return .malformed, // drop
+            0x1b => { // select
                 if (!vpop(top, .i32)) return .malformed;
                 const b = vpopAny(top) orelse return .malformed;
                 const a = vpopAny(top) orelse return .malformed;
                 if (a != .bot and b != .bot and a != b) return .malformed;
                 if (!vpush(if (a == .bot) b else a)) return .limit;
             },
-            0x20, 0x21, 0x22 => {
+            0x20, 0x21, 0x22 => { // local.get/set/tee
                 const x = c.u32leb() orelse return .malformed;
                 if (x >= nl) return .malformed;
                 if (op != 0x20 and !vpop(top, vlocals[x])) return .malformed;
                 if (op != 0x21 and !vpush(vlocals[x])) return .limit;
             },
-            0x23, 0x24 => {
+            0x23, 0x24 => { // global.get/set
                 const x = c.u32leb() orelse return .malformed;
                 if (x >= m.nglobals or (op == 0x24 and !m.globals[x].mutable)) return .malformed;
                 if (op == 0x23) {
                     if (!vpush(m.globals[x].ty)) return .limit;
                 } else if (!vpop(top, m.globals[x].ty)) return .malformed;
             },
-            0x28...0x3e => {
+            0x28...0x3e => { // load/store
                 if (!m.has_memory) return .malformed;
                 const alignment = c.u32leb() orelse return .malformed;
                 _ = c.u32leb() orelse return .malformed;
@@ -641,48 +658,48 @@ fn validateBody(m: *const Mod, fidx: u16) Trap {
                     if (!vpop(top, .i32) or !vpush(ty)) return .malformed;
                 }
             },
-            0x3f => {
+            0x3f => { // memory.size
                 if (!m.has_memory or c.byte() != 0 or !vpush(.i32)) return .malformed;
             },
-            0x40 => {
+            0x40 => { // memory.grow
                 if (!m.has_memory or c.byte() != 0 or !vun(top, .i32, .i32)) return .malformed;
             },
-            0x41 => {
+            0x41 => { // i32.const
                 _ = c.i32leb() orelse return .malformed;
                 if (!vpush(.i32)) return .limit;
             },
-            0x42 => {
+            0x42 => { // i64.const
                 _ = c.i64leb() orelse return .malformed;
                 if (!vpush(.i64)) return .limit;
             },
-            0x45, 0x67...0x69 => if (!vun(top, .i32, .i32)) return .malformed,
-            0x46...0x4f, 0x6a...0x78 => if (!vbin(top, .i32, .i32)) return .malformed,
-            0x50 => if (!vun(top, .i64, .i32)) return .malformed,
-            0x51...0x5a => if (!vbin(top, .i64, .i32)) return .malformed,
-            0x79...0x7b => if (!vun(top, .i64, .i64)) return .malformed,
-            0x7c...0x8a => if (!vbin(top, .i64, .i64)) return .malformed,
-            0xa7 => if (!vun(top, .i64, .i32)) return .malformed,
-            0xac, 0xad => if (!vun(top, .i32, .i64)) return .malformed,
-            0xc0, 0xc1 => if (!vun(top, .i32, .i32)) return .malformed,
-            0xc2...0xc4 => if (!vun(top, .i64, .i64)) return .malformed,
-            0xfc => {
+            0x45, 0x67...0x69 => if (!vun(top, .i32, .i32)) return .malformed, // i32 unop
+            0x46...0x4f, 0x6a...0x78 => if (!vbin(top, .i32, .i32)) return .malformed, // i32 binop
+            0x50 => if (!vun(top, .i64, .i32)) return .malformed, // i64.eqz
+            0x51...0x5a => if (!vbin(top, .i64, .i32)) return .malformed, // i64 relop
+            0x79...0x7b => if (!vun(top, .i64, .i64)) return .malformed, // i64 unop
+            0x7c...0x8a => if (!vbin(top, .i64, .i64)) return .malformed, // i64 binop
+            0xa7 => if (!vun(top, .i64, .i32)) return .malformed, // i32.wrap_i64
+            0xac, 0xad => if (!vun(top, .i32, .i64)) return .malformed, // i64.extend_i32
+            0xc0, 0xc1 => if (!vun(top, .i32, .i32)) return .malformed, // i32.extend
+            0xc2...0xc4 => if (!vun(top, .i64, .i64)) return .malformed, // i64.extend
+            0xfc => { // bulk memory
                 const sub = c.u32leb() orelse return .malformed;
                 if (!m.has_memory) return .malformed;
                 switch (sub) {
-                    8 => {
+                    8 => { // memory.init
                         const data = c.u32leb() orelse return .malformed;
                         if (!m.has_data_count or data >= m.ndatas or c.u32leb() != 0) return .malformed;
                         if (!vpop(top, .i32) or !vpop(top, .i32) or !vpop(top, .i32)) return .malformed;
                     },
-                    9 => {
+                    9 => { // data.drop
                         const data = c.u32leb() orelse return .malformed;
                         if (!m.has_data_count or data >= m.ndatas) return .malformed;
                     },
-                    10 => {
+                    10 => { // memory.copy
                         if (c.u32leb() != 0 or c.u32leb() != 0) return .malformed;
                         if (!vpop(top, .i32) or !vpop(top, .i32) or !vpop(top, .i32)) return .malformed;
                     },
-                    11 => {
+                    11 => { // memory.fill
                         if (c.u32leb() != 0) return .malformed;
                         if (!vpop(top, .i32) or !vpop(top, .i32) or !vpop(top, .i32)) return .malformed;
                     },
@@ -749,6 +766,13 @@ fn store(base: u32, off: u32, x: u64, n: usize) bool {
 }
 fn put32(at: u32, x: u32) bool {
     return store(at, 0, x, 4);
+}
+
+fn iovecAt(iovs: u32, i: u32) ?struct { ptr: u32, len: u32 } {
+    const base = iovs +% i *% 8;
+    const ptr = @as(u32, @truncate(load(base, 0, 4) orelse return null));
+    const len = @as(u32, @truncate(load(base, 4, 4) orelse return null));
+    return .{ .ptr = ptr, .len = len };
 }
 fn charge(lim: *Limits) bool {
     if (lim.fuel == 0) return false;
@@ -916,26 +940,21 @@ fn hostCall(host: anytype, id: HostId, args: []const u64, lim: *Limits, out: *u6
             var total: u32 = 0;
             var i: u32 = 0;
             while (i < count) : (i += 1) {
-                const base = iovs +% i *% 8;
-                const ptr = @as(u32, @truncate(load(base, 0, 4) orelse {
-                    out.* = EFAULT;
-                    return .ok;
-                }));
-                const len = @as(u32, @truncate(load(base, 4, 4) orelse {
-                    out.* = EFAULT;
-                    return .ok;
-                }));
-                const at = addr(ptr, 0, len) orelse {
+                const vec = iovecAt(iovs, i) orelse {
                     out.* = EFAULT;
                     return .ok;
                 };
-                if (host.output_used + len > lim.output_bytes) return .limit;
-                if (!host.write(fd, memory[at..][0..len])) {
+                const at = addr(vec.ptr, 0, vec.len) orelse {
+                    out.* = EFAULT;
+                    return .ok;
+                };
+                if (host.output_used + vec.len > lim.output_bytes) return .limit;
+                if (!host.write(fd, memory[at..][0..vec.len])) {
                     out.* = EBADF;
                     return .ok;
                 }
-                host.output_used += len;
-                total +%= len;
+                host.output_used += vec.len;
+                total +%= vec.len;
             }
             if (!put32(@truncate(args[3]), total)) out.* = EFAULT;
         },
@@ -953,18 +972,14 @@ fn hostCall(host: anytype, id: HostId, args: []const u64, lim: *Limits, out: *u6
             var total: u32 = 0;
             var i: u32 = 0;
             while (i < count) : (i += 1) {
-                const base = iovs +% i *% 8;
-                const ptr = @as(u32, @truncate(load(base, 0, 4) orelse {
+                const vec = iovecAt(iovs, i) orelse {
                     out.* = EFAULT;
                     return .ok;
-                }));
-                var len = @as(u32, @truncate(load(base, 4, 4) orelse {
-                    out.* = EFAULT;
-                    return .ok;
-                }));
+                };
+                var len = vec.len;
                 const left = lim.input_bytes -| host.input_used;
                 if (len > left) len = @intCast(left);
-                const at = addr(ptr, 0, len) orelse {
+                const at = addr(vec.ptr, 0, len) orelse {
                     out.* = EFAULT;
                     return .ok;
                 };
@@ -1046,7 +1061,7 @@ fn hostCall(host: anytype, id: HostId, args: []const u64, lim: *Limits, out: *u6
             if (fd > 2 or host.closed & (@as(u8, 1) << @intCast(fd)) != 0) out.* = EBADF else host.closed |= @as(u8, 1) << @intCast(fd);
         },
         .sched_yield => {},
-        .denied_errno => out.* = 76,
+        .denied_errno => out.* = 76, // ENOTCAPABLE
         .denied_trap => return .unsupported,
     }
     return .ok;
@@ -1055,20 +1070,20 @@ fn hostCall(host: anytype, id: HostId, args: []const u64, lim: *Limits, out: *u6
 fn callImport(m: *const Mod, fidx: u16, lim: *Limits, host: anytype, exit_code: *u8) Trap {
     const imp = &m.imports[fidx];
     const ft = &m.types[imp.ty];
-    if (sp < ft.pc) return .runtime;
-    const base = sp - ft.pc;
+    if (sp < ft.nparams) return .runtime;
+    const base = sp - ft.nparams;
     var result: u64 = 0;
     const t = hostCall(host, @enumFromInt(imp.host_id), stack[base..sp], lim, &result, exit_code);
     sp = base;
     if (t != .ok) return t;
-    if (ft.rc == 1 and !push(result)) return .limit;
+    if (ft.nresults == 1 and !push(result)) return .limit;
     return .ok;
 }
 
 fn execNumber(op: u8) Trap {
-    if (op == 0x45) return if (push(@intFromBool((pop() orelse return .runtime) & 0xffffffff == 0))) .ok else .limit;
-    if (op == 0x50) return if (push(@intFromBool((pop() orelse return .runtime) == 0))) .ok else .limit;
-    if (op >= 0x67 and op <= 0x69) {
+    if (op == 0x45) return if (push(@intFromBool((pop() orelse return .runtime) & 0xffffffff == 0))) .ok else .limit; // i32.eqz
+    if (op == 0x50) return if (push(@intFromBool((pop() orelse return .runtime) == 0))) .ok else .limit; // i64.eqz
+    if (op >= 0x67 and op <= 0x69) { // i32 clz/ctz/popcnt
         const a: u32 = @truncate(pop() orelse return .runtime);
         const r: u32 = switch (op) {
             0x67 => @clz(a),
@@ -1077,7 +1092,7 @@ fn execNumber(op: u8) Trap {
         };
         return if (push(r)) .ok else .limit;
     }
-    if (op >= 0x79 and op <= 0x7b) {
+    if (op >= 0x79 and op <= 0x7b) { // i64 clz/ctz/popcnt
         const a = pop() orelse return .runtime;
         const r: u64 = switch (op) {
             0x79 => @clz(a),
@@ -1086,7 +1101,7 @@ fn execNumber(op: u8) Trap {
         };
         return if (push(r)) .ok else .limit;
     }
-    if (op >= 0xc0 and op <= 0xc4) {
+    if (op >= 0xc0 and op <= 0xc4) { // sign-extend
         const a = pop() orelse return .runtime;
         const shift: u6 = switch (op) {
             0xc0, 0xc2 => 56,
@@ -1098,7 +1113,7 @@ fn execNumber(op: u8) Trap {
     }
     const x = pair() orelse return .runtime;
     var r: u64 = 0;
-    if (op >= 0x46 and op <= 0x4f) {
+    if (op >= 0x46 and op <= 0x4f) { // i32 relop
         const a: u32 = @truncate(x.a);
         const b: u32 = @truncate(x.b);
         const ai: i32 = @bitCast(a);
@@ -1115,7 +1130,7 @@ fn execNumber(op: u8) Trap {
             0x4e => ai >= bi,
             else => a >= b,
         });
-    } else if (op >= 0x51 and op <= 0x5a) {
+    } else if (op >= 0x51 and op <= 0x5a) { // i64 relop
         const ai: i64 = @bitCast(x.a);
         const bi: i64 = @bitCast(x.b);
         r = @intFromBool(switch (op) {
@@ -1130,7 +1145,7 @@ fn execNumber(op: u8) Trap {
             0x59 => ai >= bi,
             else => x.a >= x.b,
         });
-    } else if (op >= 0x6a and op <= 0x78) {
+    } else if (op >= 0x6a and op <= 0x78) { // i32 binop
         const a: u32 = @truncate(x.a);
         const b: u32 = @truncate(x.b);
         const ai: i32 = @bitCast(a);
@@ -1152,7 +1167,7 @@ fn execNumber(op: u8) Trap {
             0x77 => (a << @intCast(b & 31)) | (a >> @intCast((0 -% b) & 31)),
             else => (a >> @intCast(b & 31)) | (a << @intCast((0 -% b) & 31)),
         };
-    } else {
+    } else { // i64 binop
         const ai: i64 = @bitCast(x.a);
         const bi: i64 = @bitCast(x.b);
         r = switch (op) {
@@ -1182,23 +1197,23 @@ fn runFunc(m: *const Mod, fidx: u16, lim: *Limits, host: anytype, depth: u16, ex
     if (fidx < m.nimports) return callImport(m, fidx, lim, host, exit_code);
     const code = m.codes[fidx - m.nimports];
     const ft = &m.types[m.func_types[fidx]];
-    if (sp < ft.pc) return .runtime;
-    const base = sp - ft.pc;
+    if (sp < ft.nparams) return .runtime;
+    const base = sp - ft.nparams;
     var locals: [MAX_LOCALS]u64 = .{0} ** MAX_LOCALS;
     var i: usize = 0;
-    while (i < ft.pc) : (i += 1) locals[i] = stack[base + i];
+    while (i < ft.nparams) : (i += 1) locals[i] = stack[base + i];
     sp = base;
     var labels: [MAX_LABELS]Label = undefined;
-    labels[0] = .{ .kind = 0xff, .arity = ft.rc, .height = @intCast(sp), .cont = code.end };
+    labels[0] = .{ .kind = 0xff, .arity = ft.nresults, .height = @intCast(sp), .cont = code.end };
     var lp: usize = 1;
     var c = Cur{ .p = code.body, .e = code.end };
     while (!c.done()) {
         if (!charge(lim)) return .limit;
         const op = c.byte() orelse return .runtime;
         switch (op) {
-            0x00 => return .runtime,
-            0x01 => {},
-            0x02, 0x03, 0x04 => {
+            0x00 => return .runtime, // unreachable
+            0x01 => {}, // nop
+            0x02, 0x03, 0x04 => { // block, loop, if
                 const cond = if (op == 0x04) pop() orelse return .runtime else 1;
                 const bt = blockType(&c) orelse return .runtime;
                 const pos = findBlock(c.p, c.e, lim) orelse return if (lim.fuel == 0) .limit else .runtime;
@@ -1212,11 +1227,11 @@ fn runFunc(m: *const Mod, fidx: u16, lim: *Limits, host: anytype, depth: u16, ex
                     }
                 }
             },
-            0x05 => {
+            0x05 => { // else
                 const t = doBranch(labels[0..lp], 0, &c, &lp);
                 if (t != .ok) return t;
             },
-            0x0b => {
+            0x0b => { // end
                 const lab = labels[lp - 1];
                 var result: u64 = 0;
                 if (lab.arity == 1) result = pop() orelse return .runtime;
@@ -1226,7 +1241,7 @@ fn runFunc(m: *const Mod, fidx: u16, lim: *Limits, host: anytype, depth: u16, ex
                 lp -= 1;
                 if (lp == 0) return .ok;
             },
-            0x0c, 0x0d => {
+            0x0c, 0x0d => { // br, br_if
                 const d = c.u32leb() orelse return .runtime;
                 const take = op == 0x0c or @as(u32, @truncate(pop() orelse return .runtime)) != 0;
                 if (take) {
@@ -1235,7 +1250,7 @@ fn runFunc(m: *const Mod, fidx: u16, lim: *Limits, host: anytype, depth: u16, ex
                     if (lp == 0) return .ok;
                 }
             },
-            0x0e => {
+            0x0e => { // br_table
                 const count = c.u32leb() orelse return .runtime;
                 const pick: u32 = @truncate(pop() orelse return .runtime);
                 var chosen: u32 = 0;
@@ -1248,18 +1263,18 @@ fn runFunc(m: *const Mod, fidx: u16, lim: *Limits, host: anytype, depth: u16, ex
                 if (t != .ok) return t;
                 if (lp == 0) return .ok;
             },
-            0x0f => {
+            0x0f => { // return
                 const t = doBranch(labels[0..lp], @intCast(lp - 1), &c, &lp);
                 if (t != .ok) return t;
                 return .ok;
             },
-            0x10 => {
+            0x10 => { // call
                 const f = c.u32leb() orelse return .runtime;
                 if (f >= m.nfuncs) return .runtime;
                 const t = runFunc(m, @intCast(f), lim, host, depth + 1, exit_code);
                 if (t != .ok) return t;
             },
-            0x11 => {
+            0x11 => { // call_indirect
                 const ty = c.u32leb() orelse return .runtime;
                 if (c.byte() != 0) return .runtime;
                 const at: u32 = @truncate(pop() orelse return .runtime);
@@ -1269,33 +1284,35 @@ fn runFunc(m: *const Mod, fidx: u16, lim: *Limits, host: anytype, depth: u16, ex
                 const t = runFunc(m, f, lim, host, depth + 1, exit_code);
                 if (t != .ok) return t;
             },
-            0x1a => _ = pop() orelse return .runtime,
-            0x1b => {
+            0x1a => _ = pop() orelse return .runtime, // drop
+            0x1b => { // select
                 const cond = pop() orelse return .runtime;
                 const b = pop() orelse return .runtime;
                 const a = pop() orelse return .runtime;
                 if (!push(if (cond != 0) a else b)) return .limit;
             },
-            0x20, 0x21, 0x22 => {
+            0x20, 0x21, 0x22 => { // local.get/set/tee
                 const x = c.u32leb() orelse return .runtime;
                 if (x >= MAX_LOCALS) return .runtime;
                 if (op == 0x20) {
                     if (!push(locals[x])) return .limit;
-                } else if (op == 0x21) locals[x] = pop() orelse return .runtime else {
+                } else if (op == 0x21) {
+                    locals[x] = pop() orelse return .runtime;
+                } else {
                     if (sp == 0) return .runtime;
                     locals[x] = stack[sp - 1];
                 }
             },
-            0x23 => {
+            0x23 => { // global.get
                 const x = c.u32leb() orelse return .runtime;
                 if (x >= m.nglobals or !push(globals[x])) return .runtime;
             },
-            0x24 => {
+            0x24 => { // global.set
                 const x = c.u32leb() orelse return .runtime;
                 if (x >= m.nglobals or !m.globals[x].mutable) return .runtime;
                 globals[x] = pop() orelse return .runtime;
             },
-            0x28...0x35 => {
+            0x28...0x35 => { // load
                 _ = c.u32leb() orelse return .runtime;
                 const off = c.u32leb() orelse return .runtime;
                 const base_addr: u32 = @truncate(pop() orelse return .runtime);
@@ -1313,7 +1330,7 @@ fn runFunc(m: *const Mod, fidx: u16, lim: *Limits, host: anytype, depth: u16, ex
                 }
                 if (!push(value)) return .limit;
             },
-            0x36...0x3e => {
+            0x36...0x3e => { // store
                 _ = c.u32leb() orelse return .runtime;
                 const off = c.u32leb() orelse return .runtime;
                 const value = pop() orelse return .runtime;
@@ -1326,10 +1343,10 @@ fn runFunc(m: *const Mod, fidx: u16, lim: *Limits, host: anytype, depth: u16, ex
                 };
                 if (!store(base_addr, off, value, n)) return .runtime;
             },
-            0x3f => {
+            0x3f => { // memory.size
                 if (c.byte() != 0 or !push(memory_len / PAGE)) return .runtime;
             },
-            0x40 => {
+            0x40 => { // memory.grow
                 if (c.byte() != 0) return .runtime;
                 const add: u32 = @truncate(pop() orelse return .runtime);
                 const old = memory_len / PAGE;
@@ -1343,25 +1360,25 @@ fn runFunc(m: *const Mod, fidx: u16, lim: *Limits, host: anytype, depth: u16, ex
                     if (!push(old)) return .limit;
                 }
             },
-            0x41 => if (!push(@as(u32, @bitCast(c.i32leb() orelse return .runtime)))) return .limit,
-            0x42 => if (!push(@bitCast(c.i64leb() orelse return .runtime))) return .limit,
+            0x41 => if (!push(@as(u32, @bitCast(c.i32leb() orelse return .runtime)))) return .limit, // i32.const
+            0x42 => if (!push(@bitCast(c.i64leb() orelse return .runtime))) return .limit, // i64.const
             0x45...0x5a, 0x67...0x8a, 0xc0...0xc4 => {
                 const t = execNumber(op);
                 if (t != .ok) return t;
             },
-            0xa7 => {
+            0xa7 => { // i32.wrap_i64
                 const x = pop() orelse return .runtime;
                 if (!push(@as(u32, @truncate(x)))) return .limit;
             },
-            0xac => {
+            0xac => { // i64.extend_i32_s
                 const x: i32 = @bitCast(@as(u32, @truncate(pop() orelse return .runtime)));
                 if (!push(@bitCast(@as(i64, x)))) return .limit;
             },
-            0xad => if (!push(@as(u32, @truncate(pop() orelse return .runtime)))) return .limit,
+            0xad => if (!push(@as(u32, @truncate(pop() orelse return .runtime)))) return .limit, // i64.extend_i32_u
             0xfc => {
                 const sub = c.u32leb() orelse return .runtime;
                 switch (sub) {
-                    8 => {
+                    8 => { // memory.init
                         const data = c.u32leb() orelse return .runtime;
                         if (data >= m.ndatas or c.u32leb() != 0) return .runtime;
                         const len: u32 = @truncate(pop() orelse return .runtime);
@@ -1373,12 +1390,12 @@ fn runFunc(m: *const Mod, fidx: u16, lim: *Limits, host: anytype, depth: u16, ex
                         if (@as(u64, src) + len > source_len or !chargeBytes(lim, len)) return if (lim.fuel == 0) .limit else .runtime;
                         @memcpy(memory[at..][0..len], d.data[src..][0..len]);
                     },
-                    9 => {
+                    9 => { // data.drop
                         const data = c.u32leb() orelse return .runtime;
                         if (data >= m.ndatas) return .runtime;
                         data_dropped[data] = true;
                     },
-                    10 => {
+                    10 => { // memory.copy
                         if (c.u32leb() != 0 or c.u32leb() != 0) return .runtime;
                         const len: u32 = @truncate(pop() orelse return .runtime);
                         const src: u32 = @truncate(pop() orelse return .runtime);
@@ -1388,7 +1405,7 @@ fn runFunc(m: *const Mod, fidx: u16, lim: *Limits, host: anytype, depth: u16, ex
                         if (!chargeBytes(lim, len)) return .limit;
                         @memmove(memory[to..][0..len], memory[from..][0..len]);
                     },
-                    11 => {
+                    11 => { // memory.fill
                         if (c.u32leb() != 0) return .runtime;
                         const len: u32 = @truncate(pop() orelse return .runtime);
                         const byte: u8 = @truncate(pop() orelse return .runtime);
@@ -1432,9 +1449,9 @@ pub fn run(bytes: []const u8, limits_in: Limits, host: anytype, backing: []u8) O
     }
     if (entry(&m)) |f| {
         const ft = &m.types[m.func_types[f]];
-        if (ft.pc != 0) return .{ .trap = .malformed };
+        if (ft.nparams != 0) return .{ .trap = .malformed };
         t = runFunc(&m, f, &lim, host, 0, &code);
-        if (t == .ok and ft.rc == 1) code = @truncate(pop() orelse return .{ .trap = .runtime });
+        if (t == .ok and ft.nresults == 1) code = @truncate(pop() orelse return .{ .trap = .runtime });
         return .{ .trap = t, .code = code };
     }
     return if (m.has_start) .{ .trap = .ok } else .{ .trap = .runtime };

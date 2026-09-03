@@ -23,7 +23,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.single_threaded = true;
     exe.entry = .{ .symbol_name = "_start" };
     exe.rdynamic = false;
-    exe.link_z_max_page_size = 4096;
+    exe.link_z_max_page_size = 4096; // match link.ld page align
     const trim_exe = b.addExecutable(.{
         .name = "trim-elf",
         .root_module = b.createModule(.{
