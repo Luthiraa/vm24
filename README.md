@@ -1,3 +1,6 @@
+<img width="100" alt="ChatGPT_Image_Sep_3__2026__03_06_36_PM__1_-removebg-preview" src="https://github.com/user-attachments/assets/2ba38f94-b257-43f5-a3ba-bcfb48b8527e" />
+
+
 # vm24
 
 `vm24` is a tiny WebAssembly runtime for running untrusted stdin/stdout workers on x86-64 Linux.
